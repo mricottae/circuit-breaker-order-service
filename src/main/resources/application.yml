@@ -1,0 +1,26 @@
+spring:
+  application:
+    name: circuit-breaker-order-service
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    # DB_CLOSE_DELAY=-1 keeps the in-memory schema alive between pooled connections.
+    url: jdbc:h2:mem:orders;DB_CLOSE_DELAY=-1
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+
+server:
+  port: 8081
+
+app:
+  inventory:
+    base-url: http://localhost:8082
+    # Fail fast: without these a hung inventory would block the request forever and there would be
+    # nothing for a circuit breaker to react to.
+    connect-timeout: 2s
+    read-timeout: 3s
