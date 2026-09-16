@@ -78,7 +78,7 @@ class OrderServiceImplTest {
     void createOrder_whenInventoryUnavailable_propagatesAndPersistsNothing() {
         var request = new OrderRequest(1L, 2);
         given(inventoryClient.checkStock(1L, 2))
-                .willThrow(new InventoryUnavailableException(1L, new IllegalStateException("boom")));
+                .willThrow(InventoryUnavailableException.callFailed(1L, new IllegalStateException("boom")));
 
         assertThatThrownBy(() -> orderService.createOrder(request))
                 .isInstanceOf(InventoryUnavailableException.class);

@@ -4,18 +4,21 @@ Order intake for the circuit breaker demo, and the *caller* half of it. Every or
 [`../circuit-breaker-inventory-service`](../circuit-breaker-inventory-service) before it is confirmed,
 which makes this service's availability depend on someone else's.
 
-**There is no Resilience4j here yet, on purpose.** This is the baseline: when inventory misbehaves,
-every request still travels the full path and fails. `InventoryClient.checkStock` is the single seam
-where `@CircuitBreaker` goes in the next commit.
+`InventoryClient.checkStock` carries a Resilience4j `@CircuitBreaker`: once inventory has failed
+enough, the breaker opens and further orders are rejected **without the call ever leaving this
+service**.
 
 ## How it works
 
 ```
 POST /v1/orders ──► OrderController ──► OrderServiceImpl
                                               │
-                                     InventoryClient.checkStock   ◄── the circuit breaker seam
+                                     InventoryClient.checkStock   ◄── @CircuitBreaker("inventory")
                                               │  (RestClient, JDK HttpClient, 2s connect / 3s read)
                                               │
+                            breaker OPEN? ──yes──► checkStockFallback ──► 503 in ~1ms, no call made
+                                              │
+                                              no
                     ┌─────────────────────────┼──────────────────────────┐
                     │                         │                          │
               RestClientException        inStock: false              inStock: true
@@ -37,7 +40,7 @@ POST /v1/orders ──► OrderController ──► OrderServiceImpl
 
 ## Stack
 
-Java 21 · Spring Boot 4 · Spring MVC · RestClient · Spring Data JPA · H2 (in-memory) · Bean Validation · MapStruct · Lombok
+Java 21 · Spring Boot 4 · Spring MVC · RestClient · Resilience4j · Spring Data JPA · H2 (in-memory) · Bean Validation · MapStruct · Lombok
 
 ## Run
 
@@ -76,25 +79,91 @@ Error responses:
 | 409 | Inventory answered, but there are not enough units |
 | 503 | Inventory returned 5xx, timed out, or refused the connection |
 
-## Seeing the baseline failure
+## Circuit breaker
+
+The breaker guards the single remote call. Its configuration lives under `resilience4j.circuitbreaker.instances.inventory`:
+
+| Property | Value | Why |
+|---|---|---|
+| `sliding-window-type` | `COUNT_BASED` | The Resilience4j default: 50% of the last N calls, no clock involved. Deterministic to drive by hand, unlike `TIME_BASED` where the window empties while you type the next command. |
+| `sliding-window-size` | `10` | How many calls the rate is computed over. |
+| `minimum-number-of-calls` | `5` | **The default is 100**, which is why most hand-run demos never trip. |
+| `failure-rate-threshold` | `50` | Open once half the window failed. |
+| `wait-duration-in-open-state` | `10s` | How long it stays OPEN before probing again. |
+| `permitted-number-of-calls-in-half-open-state` | `3` | Probe calls in HALF_OPEN: all pass → CLOSED, any fails → OPEN again. |
+| `automatic-transition-from-open-to-half-open-enabled` | `true` | Without it the breaker only reaches HALF_OPEN when a call arrives, so the actuator endpoint keeps reporting OPEN with no traffic and looks stuck. |
+| `event-consumer-buffer-size` | `50` | Keeps enough history for `/actuator/circuitbreakerevents`. |
+| `record-exceptions` | `InventoryUnavailableException` | Redundant but explicit: a 409 for missing stock is raised outside the guarded method and must never open the circuit. |
+
+The fallback **rethrows** rather than returning a degraded `StockCheck`. Without knowing the stock an
+order cannot be confirmed, and inventing an answer would either reject valid orders or accept ones
+that cannot be fulfilled. **The status code does not change — the difference is in the latency.**
+
+### Watching it
 
 ```bash
-# Inventory starts failing every stock check
-curl -s -X POST localhost:8082/v1/inventory/toggle-fault      # {"faultEnabled":true}
+curl -s localhost:8081/actuator/circuitbreakers
+# state, failureRate, bufferedCalls, failedCalls, notPermittedCalls
 
-# Every order now travels the full path and comes back 503
-curl -i -X POST localhost:8081/v1/orders \
+curl -s localhost:8081/actuator/circuitbreakerevents/inventory/STATE_TRANSITION
+curl -s localhost:8081/actuator/metrics/resilience4j.circuitbreaker.state
+```
+
+The endpoint also has a write operation, so the state can be forced without causing real failures:
+
+```bash
+curl -X POST localhost:8081/actuator/circuitbreakers/inventory \
+  -H 'Content-Type: application/json' -d '{"updateState":"FORCE_OPEN"}'   # or CLOSE, or DISABLE
+```
+
+> ⚠️ **`/actuator/health` will not show the breaker on Spring Boot 4.** Resilience4j's health
+> auto-configuration is guarded on `org.springframework.boot.actuate.health.HealthIndicator`, which
+> moved to `org.springframework.boot.health.contributor` in Boot 4, so it backs off silently. Setting
+> `register-health-indicator: true` would be dead config. Read the state from `/actuator/circuitbreakers`.
+
+> ⚠️ Boot 4 has no `spring-boot-starter-aop` — it is `spring-boot-starter-aspectj`. Without it the
+> `@CircuitBreaker` annotation is ignored with no warning. If `bufferedCalls` stays at 0 after failing
+> calls, the aspect never ran.
+
+## Driving it
+
+```bash
+curl -s localhost:8081/actuator/circuitbreakers                 # CLOSED
+
+# Inventory starts failing every stock check
+curl -s -X POST localhost:8082/v1/inventory/toggle-fault        # {"faultEnabled":true}
+
+# Five failures reach minimum-number-of-calls at a 100% failure rate
+for i in $(seq 1 5); do
+  curl -s -o /dev/null -w "%{http_code} %{time_total}s\n" -X POST localhost:8081/v1/orders \
+    -H 'Content-Type: application/json' -d '{"productId":1,"quantity":2}'
+done
+
+curl -s localhost:8081/actuator/circuitbreakers                 # OPEN
+
+# Still 503, but now answered without touching inventory at all
+curl -s -o /dev/null -w "%{http_code} %{time_total}s\n" -X POST localhost:8081/v1/orders \
   -H 'Content-Type: application/json' -d '{"productId":1,"quantity":2}'
 
-curl -s -X POST localhost:8082/v1/inventory/toggle-fault      # back to normal
+# Fix inventory, wait out the 10s, then three good calls close the circuit
+curl -s -X POST localhost:8082/v1/inventory/toggle-fault
+curl -s localhost:8081/actuator/circuitbreakers                 # HALF_OPEN after ~10s
+for i in 1 2 3; do curl -s -o /dev/null -X POST localhost:8081/v1/orders \
+  -H 'Content-Type: application/json' -d '{"productId":1,"quantity":2}'; done
+curl -s localhost:8081/actuator/circuitbreakers                 # CLOSED
+```
+
+A 409 never opens the circuit — product 3 is seeded with zero stock, so this leaves the breaker CLOSED:
+
+```bash
+for i in $(seq 1 10); do curl -s -o /dev/null -X POST localhost:8081/v1/orders \
+  -H 'Content-Type: application/json' -d '{"productId":3,"quantity":1}'; done
+curl -s localhost:8081/actuator/circuitbreakers
 ```
 
 Stopping the inventory process gives the same 503 through a different route: the connection is refused
 rather than answered. On localhost that refusal is immediate — the 2s connect timeout only shows up
 against a host that accepts the TCP connection and then stalls.
-
-Either way, **every single request pays the full round trip**. That is the cost a circuit breaker
-removes, and the reason to measure it before adding one.
 
 ## Configuration
 
@@ -116,3 +185,7 @@ removes, and the reason to measure it before adding one.
 
 Mockito + AssertJ unit tests for the service and the mapper, a `MockRestServiceServer` test for the
 inventory client, and a `@WebMvcTest` slice covering 201, 400, 409 and 503.
+
+`InventoryClientCircuitBreakerTest` is the one test that needs a Spring context: the breaker is applied
+by an AOP proxy, so without the container there is nothing to exercise but the plain try/catch. It
+drives CLOSED → OPEN and asserts that the rejected call never reached the dependency.

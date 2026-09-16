@@ -1,5 +1,6 @@
 package com.mricotta.circuitbreaker.order.exception;
 
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -30,6 +31,17 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ErrorResponse> handleInventoryUnavailable(
             InventoryUnavailableException ex, HttpServletRequest request) {
         log.error("Inventory call failed while processing {}", request.getRequestURI(), ex);
+        return build(HttpStatus.SERVICE_UNAVAILABLE, ex.getMessage(), request, Map.of());
+    }
+
+    /**
+     * Safety net. With a fallback in place every open-circuit rejection already surfaces as an
+     * InventoryUnavailableException; without one this would otherwise leak out as a 500.
+     */
+    @ExceptionHandler(CallNotPermittedException.class)
+    public ResponseEntity<ErrorResponse> handleCircuitOpen(
+            CallNotPermittedException ex, HttpServletRequest request) {
+        log.warn("Circuit breaker rejected a call while processing {}", request.getRequestURI());
         return build(HttpStatus.SERVICE_UNAVAILABLE, ex.getMessage(), request, Map.of());
     }
 

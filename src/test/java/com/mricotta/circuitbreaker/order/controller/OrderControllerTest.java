@@ -80,7 +80,7 @@ class OrderControllerTest {
     @Test
     void createOrder_whenInventoryUnavailable_returnsServiceUnavailable() throws Exception {
         given(orderService.createOrder(any(OrderRequest.class)))
-                .willThrow(new InventoryUnavailableException(1L, new IllegalStateException("boom")));
+                .willThrow(InventoryUnavailableException.callFailed(1L, new IllegalStateException("boom")));
 
         mockMvc.perform(post("/v1/orders").contentType(MediaType.APPLICATION_JSON).content(VALID_BODY))
                 .andExpect(status().isServiceUnavailable())

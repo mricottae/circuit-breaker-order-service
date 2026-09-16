@@ -30,6 +30,7 @@
 		<java.version>21</java.version>
 		<mapstruct.version>1.6.3</mapstruct.version>
 		<lombok-mapstruct-binding.version>0.2.0</lombok-mapstruct-binding.version>
+		<resilience4j.version>2.3.0</resilience4j.version>
 	</properties>
 	<dependencies>
 		<dependency>
@@ -48,6 +49,21 @@
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-webmvc</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-actuator</artifactId>
+		</dependency>
+		<!-- Boot 4 renamed spring-boot-starter-aop; without it @CircuitBreaker is silently ignored. -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-aspectj</artifactId>
+		</dependency>
+		<!-- Not managed by the Spring Boot BOM, so the version is explicit. -->
+		<dependency>
+			<groupId>io.github.resilience4j</groupId>
+			<artifactId>resilience4j-spring-boot3</artifactId>
+			<version>${resilience4j.version}</version>
 		</dependency>
 
 		<dependency>

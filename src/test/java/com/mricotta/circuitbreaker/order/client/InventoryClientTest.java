@@ -8,6 +8,8 @@ import static org.springframework.test.web.client.response.MockRestResponseCreat
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 
 import com.mricotta.circuitbreaker.order.exception.InventoryUnavailableException;
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpMethod;
@@ -42,6 +44,25 @@ class InventoryClientTest {
         assertThat(stock.available()).isEqualTo(10);
         assertThat(stock.inStock()).isTrue();
         server.verify();
+    }
+
+    @Test
+    void checkStockFallback_whenCircuitIsOpen_reportsThatNoCallWasAttempted() {
+        var breaker = CircuitBreaker.ofDefaults("inventory");
+        breaker.transitionToOpenState();
+
+        assertThatThrownBy(() -> inventoryClient.checkStockFallback(
+                        1L, 2, CallNotPermittedException.createCallNotPermittedException(breaker)))
+                .isInstanceOf(InventoryUnavailableException.class)
+                .hasMessage("Inventory circuit breaker is open; stock check for product 1 was not attempted");
+    }
+
+    @Test
+    void checkStockFallback_whenTheCallFailed_rethrowsTheOriginalWithoutRewrapping() {
+        var original = InventoryUnavailableException.callFailed(1L, new IllegalStateException("boom"));
+
+        assertThatThrownBy(() -> inventoryClient.checkStockFallback(1L, 2, original))
+                .isSameAs(original);
     }
 
     @Test

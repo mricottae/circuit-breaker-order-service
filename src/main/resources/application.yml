@@ -24,3 +24,34 @@ app:
     # nothing for a circuit breaker to react to.
     connect-timeout: 2s
     read-timeout: 3s
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      inventory:
+        # COUNT_BASED is the Resilience4j default: 50% of the last N calls, no clock involved.
+        # Deterministic to drive by hand, unlike TIME_BASED where the window empties while you type.
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 10
+        # The default is 100, which is why hand-run demos never trip.
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+        # Without this the breaker only reaches HALF_OPEN when a call arrives, so the actuator
+        # endpoint keeps reporting OPEN while there is no traffic and looks stuck.
+        automatic-transition-from-open-to-half-open-enabled: true
+        event-consumer-buffer-size: 50
+        # Redundant but explicit: checkStock can only throw this one. OutOfStockException is raised in
+        # OrderServiceImpl, outside the guarded method, so a 409 never counts against the circuit.
+        record-exceptions:
+          - com.mricotta.circuitbreaker.order.exception.InventoryUnavailableException
+
+# register-health-indicator is deliberately absent: on Boot 4 the Resilience4j health auto-configuration
+# backs off, because it is guarded on org.springframework.boot.actuate.health.HealthIndicator, which
+# moved to org.springframework.boot.health.contributor. Read the state from /actuator/circuitbreakers.
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,circuitbreakers,circuitbreakerevents,metrics
